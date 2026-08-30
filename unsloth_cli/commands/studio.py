@@ -4205,6 +4205,33 @@ def update(
             # A staged run writes no launcher; there is nothing to keep recoverable.
             launcher_transaction.enabled = False
         with launcher_transaction as launcher_update:
+            # Only --local: it always reinstalls the unsloth package. A PyPI
+            # update whose move-aside failed already degrades to leaving
+            # unsloth at its old version rather than uninstalling over the
+            # locked stub, and failing that path early would break the no-op
+            # update that completes from the venv copy today (#7740's own
+            # first-cut mistake).
+            if local and launcher_update.blocks_reinstall_of_running_launcher():
+                python = launcher_update.launcher.parent / "python.exe"
+                rerun = subprocess.list2cmdline(
+                    _managed_cli_argv(python, "studio", "update", "--local")
+                )
+                typer.echo(
+                    "Error: a local update reinstalls the unsloth package, which "
+                    f"replaces {launcher_update.launcher} -- and this update is "
+                    "running from that file. Windows will not release it while "
+                    "this process lives, so pip would uninstall unsloth_cli and "
+                    "then fail on the locked launcher, leaving an unsloth.exe "
+                    "that cannot start (#7697).",
+                    err = True,
+                )
+                typer.echo(
+                    "Re-run the update through the managed interpreter, whose "
+                    "entry nothing needs to replace:",
+                    err = True,
+                )
+                typer.echo(f"  {rerun}", err = True)
+                raise typer.Exit(1)
             _run_setup_script(verbose = verbose, repo_root = repo_root)
             # This deliberately runs even with --no-verify: the broad package scan
             # is optional, but a successful update must leave its own launcher usable.
@@ -4271,6 +4298,7 @@ class _WindowsLauncherUpdateTransaction:
         self.lock_path: Optional[Path] = None
         self._lock_file = None
         self._validated = False
+        self.move_aside_error: Optional[OSError] = None
 
     @staticmethod
     def _is_valid_pe(path: Path) -> bool:
@@ -4408,6 +4436,11 @@ class _WindowsLauncherUpdateTransaction:
         try:
             os.replace(self.launcher, self.stale)
         except OSError as exc:
+            # Recorded, not just reported: whether a reinstall may proceed at
+            # all depends on WHO holds the entry, and only the caller knows
+            # whether its update must reinstall (see
+            # blocks_reinstall_of_running_launcher).
+            self.move_aside_error = exc
             # Not fatal: an antivirus hold must not make the environment
             # unupdatable. But say what it costs, because uv cannot then replace
             # the launcher and the pip fallback drops --upgrade-package, so
@@ -4418,6 +4451,31 @@ class _WindowsLauncherUpdateTransaction:
                 f"{self.launcher} and re-run the update.",
                 err = True,
             )
+
+    def blocks_reinstall_of_running_launcher(self) -> bool:
+        """The failed move-aside is this process's own directory entry.
+
+        Windows locks the entry an image was launched from, so when the update
+        runs as the venv's own Scripts\\unsloth.exe no retry from this process
+        or a child of it can free the path while it lives (#7740): the sibling
+        that setup.ps1 spawns hits the identical WinError 32. An update that
+        must reinstall the unsloth package then dies mid-uninstall -- pip
+        removes unsloth_cli first and only then hits the locked stub -- and
+        what is left is a launcher that starts and immediately raises
+        ModuleNotFoundError. That caller has to stop before setup runs.
+
+        Compared by directory entry, never by inode: the bin shim hardlinks
+        the same file, but launching through the shim locks the shim's entry
+        and this one stays movable, so a shim-launched update whose move-aside
+        failed for another reason (an antivirus hold) keeps its current
+        non-fatal path.
+        """
+        if not self.enabled or self.move_aside_error is None or self.launcher is None:
+            return False
+        argv0 = sys.argv[0] if sys.argv else ""
+        if not argv0:
+            return False
+        return os.path.normcase(os.path.abspath(argv0)) == os.path.normcase(str(self.launcher))
 
     def _retained_backup(self) -> Optional[Path]:
         """The backup, when it exists and is usable. Nothing to point users at otherwise."""

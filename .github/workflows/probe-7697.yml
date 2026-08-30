@@ -1,0 +1,55 @@
+# Throwaway probe for #7697 — never merged. Reproduces the self-locked
+# `studio update --local` on a real windows-latest runner and verifies the
+# guard stops it before pip can destroy the install.
+name: probe-7697
+on:
+  push:
+    branches: [probe/7697]
+  workflow_dispatch:
+
+jobs:
+  self-locked-local-update:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the CLI into a venv (base deps only, no torch)
+        shell: pwsh
+        run: |
+          python -m venv venv
+          venv\Scripts\python -m pip install --quiet --upgrade pip
+          venv\Scripts\pip install --quiet .
+
+      - name: "A: update --local from the venv's own unsloth.exe stops before setup"
+        shell: pwsh
+        run: |
+          $env:STUDIO_LOCAL_REPO = "$PWD"
+          $out = & venv\Scripts\unsloth.exe studio update --local 2>&1 | Out-String
+          Write-Host $out
+          Write-Host "exit code: $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 1) { throw "expected exit 1 from the guard, got $LASTEXITCODE" }
+          if ($out -notmatch "7697") { throw "guard message missing from output" }
+          if ($out -match "Uninstalling") { throw "pip reached an uninstall - the guard fired too late" }
+
+      - name: "B: the install is intact after the refused update"
+        shell: pwsh
+        run: |
+          & venv\Scripts\unsloth.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "launcher broken after the aborted update" }
+          venv\Scripts\pip show unsloth
+          if ($LASTEXITCODE -ne 0) { throw "unsloth package metadata gone" }
+
+      - name: "C (best effort): the managed-interpreter re-run does not trip the guard"
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $env:STUDIO_LOCAL_REPO = "$PWD"
+          $out = & venv\Scripts\python.exe -X utf8 -c "from unsloth_cli import app; app()" studio update --local 2>&1 | Out-String
+          Write-Host $out
+          Write-Host "exit code: $LASTEXITCODE"
+          if ($out -match "running from that file") { throw "guard fired for a python.exe launch" }
