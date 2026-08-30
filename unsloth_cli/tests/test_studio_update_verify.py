@@ -493,6 +493,9 @@ def _run_update(monkeypatch, argv, verified):
         def __enter__(self):
             return self
 
+        def blocks_reinstall_of_running_launcher(self):
+            return False
+
         def validate_launcher(self):
             pass
 
