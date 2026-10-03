@@ -195,6 +195,24 @@ def _load_optional(module_name: str) -> Any:
     except Exception as exc:  # noqa: BLE001 - an older/absent unsloth_zoo must degrade, not crash
         first_error = exc
 
+    # Same rule as _load_shared: on a host with an accelerator the light-init retry makes unsloth_zoo
+    # inject its triton/bitsandbytes STUBS into sys.modules for the rest of the process. The stub's
+    # jit is a pass-through, so the next `import xformers` (diffusers does it on sight) dies with
+    # "'function' object has no attribute 'fn'" until the backend restarts (#12466). Degrade instead.
+    if _gpu_present():
+        with _load_lock:
+            _optional_modules[module_name] = None
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "%s unavailable (%s). Not retrying under UNSLOTH_ZOO_DISABLE_GPU_INIT because this "
+            "host has an accelerator and that path would stub out triton/bitsandbytes for the "
+            "whole process.",
+            module_name,
+            first_error,
+        )
+        return None
+
     # Deliberately the SAME lock _load_shared uses: interleaved save/set/restore would leave
     # UNSLOTH_ZOO_DISABLE_GPU_INIT set for the life of the process (see _load_lock).
     with _load_lock:

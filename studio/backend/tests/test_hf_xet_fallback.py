@@ -385,6 +385,54 @@ def test_no_light_gpu_init_retry_on_an_accelerator_host(monkeypatch):
             sys.modules["utils.hf_xet_fallback"] = saved_shim
 
 
+def test_an_optional_module_is_not_retried_under_light_gpu_init_on_an_accelerator_host(monkeypatch):
+    """The optional Xet helpers (health, tuning) took the UNSLOTH_ZOO_DISABLE_GPU_INIT retry without the
+    accelerator check _load_shared makes. On a CUDA host whose unsloth_zoo import failed for an unrelated
+    reason, that retry succeeded and left unsloth_zoo's Triton stub in sys.modules for the rest of the
+    process: @triton.jit stopped decorating, and the next `import xformers` (diffusers does it on sight)
+    died with "'function' object has no attribute 'fn'" until the backend was restarted (#12466)."""
+    monkeypatch.delenv("UNSLOTH_ZOO_DISABLE_GPU_INIT", raising = False)
+    attempts = []
+
+    class _Blocker:
+        def find_spec(
+            self,
+            name,
+            path = None,
+            target = None,
+        ):
+            if name == "unsloth_zoo":
+                attempts.append(os.environ.get("UNSLOTH_ZOO_DISABLE_GPU_INIT"))
+                raise RuntimeError("CUDA Setup failed despite GPU being available")
+            return None
+
+    finder = _Blocker()
+    saved = {
+        k: v
+        for k, v in list(sys.modules.items())
+        if k == "unsloth_zoo" or k.startswith("unsloth_zoo.")
+    }
+    for k in saved:
+        del sys.modules[k]
+    saved_shim = sys.modules.pop("utils.hf_xet_fallback", None)
+    sys.meta_path.insert(0, finder)
+    try:
+        shim = importlib.import_module("utils.hf_xet_fallback")
+        monkeypatch.setattr(shim, "_gpu_present", lambda: True)
+        assert shim.xet_health() is None
+        # Exactly ONE attempt, made without the light-init flag, and the verdict is memoised.
+        assert attempts == [None], attempts
+        assert shim._load_optional("unsloth_zoo.hf_xet_health") is None
+        assert attempts == [None], attempts
+        assert os.environ.get("UNSLOTH_ZOO_DISABLE_GPU_INIT") is None
+    finally:
+        sys.meta_path.remove(finder)
+        sys.modules.pop("utils.hf_xet_fallback", None)
+        sys.modules.update(saved)
+        if saved_shim is not None:
+            sys.modules["utils.hf_xet_fallback"] = saved_shim
+
+
 def test_retries_under_light_gpu_init_when_import_fails(monkeypatch):
     """GPU detection in unsloth_zoo's __init__ raises NotImplementedError on a GPU-less host. The shim
     retries under UNSLOTH_ZOO_DISABLE_GPU_INIT=1, restores the env, and degrades if the retry fails.
