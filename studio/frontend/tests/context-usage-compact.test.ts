@@ -29,3 +29,17 @@ test("the header shrinks the context bar before the model name", () => {
   assert.match(page, /"pointer-events-auto flex min-w-0 items-center gap-1"/);
   assert.match(page, /ml-auto flex min-w-min max-w-max grow basis-0 items-center gap-1 \*:shrink-0/);
 });
+
+test("the context meter stays up for a chat started on a project's landing (#12533)", () => {
+  // Such a chat runs in place with the URL still on the project, so a gate on the single view
+  // alone hid the meter until the chat was reopened by its thread id.
+  const page = readSrc("features/chat/chat-page.tsx");
+  assert.match(
+    page,
+    /const chatOpen =\s*view\.mode === "single" \|\|\s*\(view\.mode === "project" && activeThreadId !== null\);/,
+  );
+  assert.match(
+    page,
+    /\{showContextWindowUsage &&\s*chatOpen &&\s*\(contextUsage \|\| contextWindowKnown\) \? \(\s*<ContextUsageBar/,
+  );
+});

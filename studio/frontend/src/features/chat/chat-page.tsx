@@ -2904,6 +2904,13 @@ export function ChatPage({
     persistedActiveThreadId,
     currentProjectId,
   ]);
+  // A chat started on a project's landing runs there in place, with the URL still on the project
+  // (#8908), so the view reads "project" for a conversation as live as any single chat. The
+  // context meter went missing for the whole first session, until the chat was reopened by its
+  // thread id (#12533).
+  const chatOpen =
+    view.mode === "single" ||
+    (view.mode === "project" && activeThreadId !== null);
 
   const [projectNewThreadNonce, setProjectNewThreadNonce] = useState(() =>
     createThreadNonce(),
@@ -4318,7 +4325,7 @@ export function ChatPage({
           </div>
           <div className="pointer-events-auto ml-auto flex min-w-min max-w-max grow basis-0 items-center gap-1 *:shrink-0">
             {showContextWindowUsage &&
-            view.mode === "single" &&
+            chatOpen &&
             (contextUsage || contextWindowKnown) ? (
               <ContextUsageBar
                 used={contextUsage?.totalTokens ?? null}
