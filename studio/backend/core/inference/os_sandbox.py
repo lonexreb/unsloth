@@ -253,6 +253,20 @@ def directory_witness_matches(witness: "list[tuple]") -> bool:
     return all(directory_signature(entry[0]) == entry for entry in witness)
 
 
+def _lstat_entry(path: str) -> os.stat_result:
+    """lstat the directory entry itself, not what the Win32 namespace makes of its name.
+
+    Git Bash writes ``> nul`` as a real file in the workdir (MSYS opens names through the
+    extended-length namespace), and a plain ``lstat`` of that name, like con/aux/com1/lpt1, answers
+    the DOS device instead, so the entry read as a device node and MXC refused every call until the
+    file was deleted by hand (#12473). The ``\\\\?\\`` form reaches the entry on disk.
+    """
+    if sys.platform == "win32" and not path.startswith("\\\\?\\"):
+        path = path.replace("/", "\\")
+        path = "\\\\?\\UNC\\" + path[2:] if path.startswith("\\\\") else "\\\\?\\" + path
+    return os.lstat(path)
+
+
 def _host_channel_hazard(
     root: str,
     max_entries: int,
@@ -266,6 +280,9 @@ def _host_channel_hazard(
     links: dict[tuple[int, int], list] = {}
     unreadable: list[str] = []
 
+    if sys.platform == "win32":
+        # The extended-length form _lstat_entry builds needs an absolute path.
+        root = os.path.abspath(root)
     for base, dirs, names in os.walk(
         root, followlinks = False, onerror = lambda exc: unreadable.append(exc.filename or root)
     ):
@@ -282,7 +299,7 @@ def _host_channel_hazard(
                 )
             path = os.path.join(base, name)
             try:
-                info = os.lstat(path)
+                info = _lstat_entry(path)
             except OSError:
                 return f"changed during its safety scan: {path}"
             # Windows only: MXC grants the workdir by path, so a junction or symlink inside it widens the grant.
