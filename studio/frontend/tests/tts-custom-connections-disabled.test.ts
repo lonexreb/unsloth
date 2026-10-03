@@ -89,6 +89,9 @@ function load(
       "../search-images/search-images": {
         stripSearchImageTokens: (text: string) => text,
       },
+      "../utils/spoken-text": {
+        markdownToSpeech: (text: string) => text,
+      },
       "../stores/external-providers-store": {
         useExternalProvidersStore: {
           getState: () => ({
@@ -351,4 +354,66 @@ test("the custom TTS selection is dropped when its connection disappears", () =>
     voiceTab,
     /value=\{hasSelectedTtsConnection \? ttsProviderId : ""\}/,
   );
+});
+
+test("read aloud hands a backend engine the words, not the markdown (#12547)", async () => {
+  const spoken = await import("../src/features/chat/utils/spoken-text.ts");
+  const posted: string[] = [];
+  const adapter = loadWithStubs<{
+    StudioSpeechSynthesisAdapter: new () => {
+      speak: (text: string) => { cancel: () => void };
+    };
+  }>(
+    new URL(
+      "../src/features/chat/adapters/studio-speech-synthesis-adapter.ts",
+      import.meta.url,
+    ),
+    {
+      "@/features/auth": {
+        authFetch: async (_input: string, init: { body: string }) => {
+          posted.push(init.body);
+          return {
+            ok: true,
+            headers: { get: () => "audio/wav" },
+            arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+          };
+        },
+      },
+      "../search-images/search-images": {
+        stripSearchImageTokens: (text: string) => text,
+      },
+      "../utils/spoken-text": spoken,
+      "../stores/external-providers-store": {
+        useExternalProvidersStore: {
+          getState: () => ({
+            connectionsEnabled: true,
+            providers: [{ id: "conn-1", hasApiKey: true }],
+          }),
+        },
+      },
+      "../api/providers-api": { encryptProviderApiKey: async () => "" },
+      "../external-providers": { getExternalProviderApiKey: () => "" },
+      "@/features/settings/stores/voice-settings-store": {
+        useVoiceSettingsStore: {
+          getState: () => ({
+            ttsEngine: "custom",
+            ttsProviderId: "conn-1",
+            ttsProviderModel: "kokoro",
+            ttsProviderVoice: "af_sky",
+            ttsRate: 1,
+            ttsVolume: 1,
+            setTtsProviderId: () => {},
+          }),
+        },
+      },
+      "@/lib/toast": { toast: { error: () => {} } },
+    },
+  );
+  const utterance = new adapter.StudioSpeechSynthesisAdapter().speak(
+    "**Done.** See [the docs](https://docs.unsloth.ai).",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  utterance.cancel();
+  assert.equal(posted.length, 1);
+  assert.equal(JSON.parse(posted[0]).input, "Done. See the docs.");
 });
